@@ -2,7 +2,7 @@
   "name": "vscode-perfetto",
   "displayName": "VSCode Perfetto",
   "description": "Open trace files in bundled Perfetto UI from VS Code.",
-  "version": "0.0.2",
+  "version": "0.0.4",
   "publisher": "allen",
   "packageManager": "pnpm@10.30.0",
   "engines": {
@@ -64,14 +64,19 @@
   },
   "scripts": {
     "compile": "tsc -p ./",
+    "compile:test": "tsc -p ./tsconfig.test.json",
     "package:vsix": "vsce package --no-yarn --allow-missing-repository --skip-license",
+    "test:e2e": "pnpm run compile && pnpm run compile:test && node ./dist/test/runTest.js",
     "perfetto:build:source": "./scripts/build-perfetto-ui-from-source.sh",
     "perfetto:fetch": "./scripts/fetch-perfetto-ui.sh"
   },
   "devDependencies": {
-    "@vscode/vsce": "^3.6.2",
+    "@types/mocha": "^10.0.10",
     "@types/node": "^24.5.2",
     "@types/vscode": "^1.96.0",
+    "@vscode/test-electron": "^2.5.2",
+    "@vscode/vsce": "^3.6.2",
+    "mocha": "^11.7.5",
     "typescript": "^5.9.2"
   }
 }

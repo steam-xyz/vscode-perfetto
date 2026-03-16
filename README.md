@@ -1,19 +1,19 @@
 # vscode-perfetto
 
-在 VS Code 中直接打开内置 Perfetto UI。扩展通过 `vscode.workspace.fs` 读取文件, 所以本地和 Remote-SSH 都可用。
+Open trace files in the bundled Perfetto UI from VS Code. The extension reads files through `vscode.workspace.fs`, so it works for both local folders and Remote-SSH workspaces.
 
-右键 `.json`、`.chrom_trace` 或 `.chrome_trace` 文件, 选择 `Open in Perfetto` 即可打开。也可以先打开文件, 再运行命令 `Perfetto: Open in Perfetto`。
+Right-click a `.json`, `.chrom_trace`, or `.chrome_trace` file and choose `Open in Perfetto`. You can also open the file first, then run `Perfetto: Open in Perfetto`.
 
-需要看调试日志时, 运行命令 `Perfetto: Show Output`。
+Use `Perfetto: Show Output` to inspect extension logs.
 
-更新内置 Perfetto UI:
+## Update Bundled Perfetto UI
 
 ```bash
 pnpm run perfetto:fetch
 pnpm run perfetto:build:source
 ```
 
-## 开发
+## Development
 
 ```bash
 pnpm install
@@ -21,4 +21,33 @@ pnpm run compile
 pnpm run package:vsix
 ```
 
-按 `F5` 启动调试。需要切到外部 Perfetto UI 时, 把 `perfetto.uiUrl` 改成对应地址即可。
+Press `F5` to launch the extension host. To use an external Perfetto UI, set `perfetto.uiUrl` to the target URL.
+
+## CLI Debugging and E2E Tests
+
+Start an extension development host from the command line without packaging a `.vsix`:
+
+```bash
+code --extensionDevelopmentPath="$(pwd)" --disable-extensions .
+```
+
+Run unattended end-to-end tests with:
+
+```bash
+pnpm run test:e2e
+```
+
+This command:
+
+- Compiles the extension and test code.
+- Reuses your installed VS Code instead of downloading another copy.
+- Loads this repository through `--extensionDevelopmentPath`, without installing a `.vsix`.
+- Opens `demos/softmax.chrome_trace` and verifies the Perfetto panel and extension logs.
+
+Requirement:
+
+```bash
+which code
+```
+
+The `code` CLI must be on `PATH` and point to your desktop VS Code installation.

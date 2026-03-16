@@ -1,0 +1,293 @@
+import * as fs from 'node:fs/promises';
+import * as http from 'node:http';
+import * as path from 'node:path';
+import * as vscode from 'vscode';
+
+const CONTENT_TYPES = new Map<string, string>([
+  ['.css', 'text/css; charset=utf-8'],
+  ['.html', 'text/html; charset=utf-8'],
+  ['.js', 'text/javascript; charset=utf-8'],
+  ['.json', 'application/json; charset=utf-8'],
+  ['.map', 'application/json; charset=utf-8'],
+  ['.png', 'image/png'],
+  ['.svg', 'image/svg+xml'],
+  ['.txt', 'text/plain; charset=utf-8'],
+  ['.wasm', 'application/wasm'],
+  ['.woff2', 'font/woff2'],
+]);
+
+export class BundledUiServer implements vscode.Disposable {
+  private readonly rootPath: string;
+  private readonly log: (message: string) => void;
+  private server: http.Server | undefined;
+  private externalBaseUrlPromise: Promise<string> | undefined;
+
+  public constructor(extensionUri: vscode.Uri, log: (message: string) => void) {
+    this.rootPath = path.join(extensionUri.fsPath, 'perfetto-ui');
+    this.log = log;
+  }
+
+  public async getUiUrl(): Promise<string> {
+    if (!this.externalBaseUrlPromise) {
+      this.externalBaseUrlPromise = this.start();
+    }
+
+    return `${await this.externalBaseUrlPromise}/`;
+  }
+
+  public dispose(): void {
+    this.externalBaseUrlPromise = undefined;
+
+    if (!this.server) {
+      return;
+    }
+
+    this.server.close();
+    this.server = undefined;
+  }
+
+  private async start(): Promise<string> {
+    this.server = http.createServer((request, response) => {
+      void this.handleRequest(request, response);
+    });
+
+    await new Promise<void>((resolve, reject) => {
+      const onError = (error: Error): void => {
+        this.server?.off('error', onError);
+        reject(error);
+      };
+
+      this.server?.once('error', onError);
+      this.server?.listen(0, '127.0.0.1', () => {
+        this.server?.off('error', onError);
+        resolve();
+      });
+    });
+
+    const address = this.server.address();
+    if (!address || typeof address === 'string') {
+      throw new Error('Failed to determine bundled Perfetto UI server address.');
+    }
+
+    const localUri = vscode.Uri.parse(`http://127.0.0.1:${address.port}`);
+    const externalUri = await vscode.env.asExternalUri(localUri);
+    const baseUrl = externalUri.toString().replace(/\/$/, '');
+    this.log(`Bundled Perfetto UI server listening at ${baseUrl}`);
+    return baseUrl;
+  }
+
+  private async handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
+    try {
+      const method = request.method ?? 'GET';
+      if (method !== 'GET' && method !== 'HEAD') {
+        response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
+        response.end('Method Not Allowed');
+        return;
+      }
+
+      const filePath = this.resolveFilePath(request.url ?? '/');
+      if (!filePath) {
+        response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
+        response.end('Bad Request');
+        return;
+      }
+
+      const stat = await fs.stat(filePath);
+      if (!stat.isFile()) {
+        response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
+        response.end('Not Found');
+        return;
+      }
+
+      if (path.basename(filePath) === 'index.html') {
+        const indexHtml = await fs.readFile(filePath, 'utf8');
+        const responseBody = injectBridgeScript(indexHtml);
+        response.writeHead(200, {
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-store',
+          'Content-Length': Buffer.byteLength(responseBody),
+          'Content-Type': 'text/html; charset=utf-8',
+        });
+        response.end(method === 'HEAD' ? undefined : responseBody);
+        return;
+      }
+
+      const extension = path.extname(filePath).toLowerCase();
+      const headers: Record<string, string | number> = {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+        'Content-Length': stat.size,
+        'Content-Type': CONTENT_TYPES.get(extension) ?? 'application/octet-stream',
+      };
+
+      if (path.basename(filePath) === 'service_worker.js') {
+        headers['Service-Worker-Allowed'] = '/';
+      }
+
+      response.writeHead(200, headers);
+      if (method === 'HEAD') {
+        response.end();
+        return;
+      }
+
+      response.end(await fs.readFile(filePath));
+    } catch (error) {
+      const code = isNodeError(error) && error.code === 'ENOENT' ? 404 : 500;
+      response.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.end(code === 404 ? 'Not Found' : 'Internal Server Error');
+    }
+  }
+
+  private resolveFilePath(requestUrl: string): string | undefined {
+    const url = new URL(requestUrl, 'http://127.0.0.1');
+    let pathname = decodeURIComponent(url.pathname);
+    if (pathname === '/') {
+      pathname = '/index.html';
+    }
+
+    const resolvedPath = path.resolve(this.rootPath, `.${pathname}`);
+    const rootPrefix = this.rootPath.endsWith(path.sep) ? this.rootPath : `${this.rootPath}${path.sep}`;
+    if (resolvedPath !== this.rootPath && !resolvedPath.startsWith(rootPrefix)) {
+      return undefined;
+    }
+
+    return resolvedPath;
+  }
+}
+
+function injectBridgeScript(html: string): string {
+  const bridgeScript = `<script type="text/javascript">
+    'use strict';
+    (function () {
+      const LOG_KEY = '__vscodePerfettoLog__';
+      const STATE_KEY = '__vscodePerfettoState__';
+      let pendingTrace = undefined;
+      let readyNotified = false;
+      let readyTimerId = undefined;
+
+      function postMessageToHost(key, payload) {
+        try {
+          if (!window.parent || window.parent === window) {
+            return;
+          }
+
+          window.parent.postMessage({
+            [key]: payload,
+          }, '*');
+        } catch (_) {
+          // Best-effort bridge only.
+        }
+      }
+
+      function formatLogArg(value) {
+        if (typeof value === 'string') {
+          return value;
+        }
+
+        if (value instanceof Error) {
+          return value.stack || value.message;
+        }
+
+        try {
+          return JSON.stringify(value);
+        } catch {
+          return String(value);
+        }
+      }
+
+      function postLog(level, args) {
+        postMessageToHost(LOG_KEY, {
+          level,
+          message: args.map(formatLogArg).join(' '),
+        });
+      }
+
+      function postState(code, message) {
+        postMessageToHost(STATE_KEY, {
+          code,
+          message,
+        });
+      }
+
+      function canOpenTraceDirectly() {
+        return !!(window.app && typeof window.app.openTraceFromBuffer === 'function');
+      }
+
+      function openTraceDirectly(trace) {
+        if (!canOpenTraceDirectly()) {
+          pendingTrace = trace;
+          postLog('debug', ['Buffered trace until Perfetto UI became ready:', trace.title]);
+          return;
+        }
+
+        pendingTrace = undefined;
+        try {
+          window.app.openTraceFromBuffer({
+            buffer: trace.buffer,
+            title: trace.title,
+          });
+          postLog('info', ['Opened trace via direct bridge:', trace.title]);
+        } catch (error) {
+          postLog('error', ['Failed to open trace via direct bridge:', error]);
+        }
+      }
+
+      function maybeNotifyReady() {
+        if (readyNotified || !canOpenTraceDirectly()) {
+          return;
+        }
+
+        readyNotified = true;
+        if (readyTimerId !== undefined) {
+          window.clearInterval(readyTimerId);
+          readyTimerId = undefined;
+        }
+        postState('trace_ready', 'Perfetto UI is ready to receive traces.');
+        if (pendingTrace) {
+          openTraceDirectly(pendingTrace);
+        }
+      }
+
+      function earlyMessageHandler(event) {
+        const data = event.data;
+        if (data === 'PING') {
+          event.stopImmediatePropagation();
+          event.source?.postMessage('PONG', '*');
+          return;
+        }
+
+        if (!data || typeof data !== 'object' || data.__vscodePerfettoOpenTrace__ !== true) {
+          return;
+        }
+
+        event.stopImmediatePropagation();
+        openTraceDirectly(data);
+      }
+
+      for (const level of ['debug', 'info', 'log', 'warn', 'error']) {
+        const original = typeof console[level] === 'function' ? console[level].bind(console) : console.log.bind(console);
+        console[level] = (...args) => {
+          original(...args);
+          postLog(level, args);
+        };
+      }
+
+      window.addEventListener('error', (event) => {
+        postLog('error', [event.error?.stack || event.error?.message || event.message || 'Unknown iframe error']);
+      });
+      window.addEventListener('unhandledrejection', (event) => {
+        postLog('error', ['Unhandled rejection:', event.reason instanceof Error ? event.reason.stack || event.reason.message : formatLogArg(event.reason)]);
+      });
+      window.addEventListener('message', earlyMessageHandler, { capture: true, passive: true });
+      window.addEventListener('load', maybeNotifyReady);
+      readyTimerId = window.setInterval(maybeNotifyReady, 100);
+      postLog('debug', ['Perfetto UI bridge installed.']);
+    })();
+  </script>`;
+
+  return html.replace('</body>', `  ${bridgeScript}\n</body>`);
+}
+
+function isNodeError(value: unknown): value is NodeJS.ErrnoException {
+  return !!value && typeof value === 'object' && 'code' in value;
+}

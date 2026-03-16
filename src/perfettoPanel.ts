@@ -4,6 +4,12 @@ import * as vscode from 'vscode';
 const VIEW_TYPE = 'vscode-perfetto.viewer';
 const CHUNK_SIZE = 256 * 1024;
 
+export type PerfettoUiTarget = {
+  url: string;
+  label: string;
+  isBundled: boolean;
+};
+
 export class PerfettoPanel implements vscode.Disposable {
   public static currentPanel: PerfettoPanel | undefined;
 
@@ -11,69 +17,74 @@ export class PerfettoPanel implements vscode.Disposable {
   private readonly extensionUri: vscode.Uri;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly log: (message: string) => void;
-  private uiUrlOverride: string | undefined;
+  private uiTarget: PerfettoUiTarget;
 
   public static createOrShow(
     extensionUri: vscode.Uri,
-    uiUrlOverride: string | undefined,
+    uiTarget: PerfettoUiTarget,
     log: (message: string) => void,
   ): PerfettoPanel {
     if (PerfettoPanel.currentPanel) {
       PerfettoPanel.currentPanel.panel.reveal(vscode.ViewColumn.Active);
-      PerfettoPanel.currentPanel.setUiUrl(uiUrlOverride);
+      PerfettoPanel.currentPanel.setUiTarget(uiTarget);
       return PerfettoPanel.currentPanel;
     }
 
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, 'Perfetto', vscode.ViewColumn.Active, {
       enableScripts: true,
       retainContextWhenHidden: true,
-      localResourceRoots: [
-        vscode.Uri.joinPath(extensionUri, 'media'),
-        vscode.Uri.joinPath(extensionUri, 'perfetto-ui'),
-      ],
+      localResourceRoots: [vscode.Uri.joinPath(extensionUri, 'media')],
     });
 
-    PerfettoPanel.currentPanel = new PerfettoPanel(panel, extensionUri, uiUrlOverride, log);
+    PerfettoPanel.currentPanel = new PerfettoPanel(panel, extensionUri, uiTarget, log);
     return PerfettoPanel.currentPanel;
   }
 
   private constructor(
     panel: vscode.WebviewPanel,
     extensionUri: vscode.Uri,
-    uiUrlOverride: string | undefined,
+    uiTarget: PerfettoUiTarget,
     log: (message: string) => void,
   ) {
     this.panel = panel;
     this.extensionUri = extensionUri;
-    this.uiUrlOverride = uiUrlOverride;
+    this.uiTarget = uiTarget;
     this.log = log;
     this.panel.webview.html = this.getHtml();
     this.panel.onDidDispose(() => this.dispose(), null, this.disposables);
     this.panel.webview.onDidReceiveMessage((message) => this.handleWebviewMessage(message), null, this.disposables);
-    this.log(`Created webview panel for ${this.resolveUiTarget(this.panel.webview).label}.`);
+    this.log(`Created webview panel for ${this.uiTarget.label}.`);
   }
 
-  public setUiUrl(uiUrlOverride: string | undefined): void {
-    this.uiUrlOverride = uiUrlOverride;
-    const target = this.resolveUiTarget(this.panel.webview);
-    this.log(`Webview target set to ${target.label}.`);
-    void this.panel.webview.postMessage({ type: 'setUiUrl', uiUrl: target.url, uiLabel: target.label });
+  public setUiTarget(uiTarget: PerfettoUiTarget): void {
+    this.uiTarget = uiTarget;
+    this.log(`Webview target set to ${uiTarget.label}.`);
+    void this.panel.webview.postMessage({
+      type: 'setUiUrl',
+      uiUrl: uiTarget.url,
+      uiLabel: uiTarget.label,
+      uiIsBundled: uiTarget.isBundled,
+    });
   }
 
   public async openTrace(traceUri: vscode.Uri, bytes: Uint8Array): Promise<void> {
     const fileName = path.posix.basename(traceUri.path) || traceUri.toString(true);
     const transferId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const totalChunks = Math.max(1, Math.ceil(bytes.byteLength / CHUNK_SIZE));
-    const target = this.resolveUiTarget(this.panel.webview);
 
     this.panel.title = `Perfetto: ${fileName}`;
-    this.log(`Sending ${fileName} to webview in ${totalChunks} chunk(s) using ${target.label}.`);
+    if (this.uiTarget.isBundled) {
+      this.log(`Sending ${fileName} to bundled Perfetto UI via webview bridge in ${totalChunks} chunk(s).`);
+    } else {
+      this.log(`Sending ${fileName} to webview in ${totalChunks} chunk(s) using ${this.uiTarget.label}.`);
+    }
 
     await this.panel.webview.postMessage({
       type: 'openTraceStart',
       transferId,
-      uiUrl: target.url,
-      uiLabel: target.label,
+      uiUrl: this.uiTarget.url,
+      uiLabel: this.uiTarget.label,
+      uiIsBundled: this.uiTarget.isBundled,
       fileName,
       totalChunks,
       totalBytes: bytes.byteLength,
@@ -111,7 +122,6 @@ export class PerfettoPanel implements vscode.Disposable {
   private getHtml(): string {
     const scriptUri = this.panel.webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'panel.js'));
     const nonce = getNonce();
-    const target = this.resolveUiTarget(this.panel.webview);
 
     return `<!DOCTYPE html>
 <html lang="en">
@@ -119,7 +129,7 @@ export class PerfettoPanel implements vscode.Disposable {
     <meta charset="UTF-8" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; frame-src ${this.panel.webview.cspSource} https: http:;"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'nonce-${nonce}'; frame-src https: http:;"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Perfetto</title>
@@ -148,11 +158,12 @@ export class PerfettoPanel implements vscode.Disposable {
     </style>
   </head>
   <body>
-    <div id="status">Connecting to ${escapeHtml(target.label)}...</div>
+    <div id="status">Connecting to ${escapeHtml(this.uiTarget.label)}...</div>
     <iframe id="frame" title="Perfetto UI"></iframe>
     <script nonce="${nonce}">
-      window.__PERFETTO_UI_URL__ = ${JSON.stringify(target.url)};
-      window.__PERFETTO_UI_LABEL__ = ${JSON.stringify(target.label)};
+      window.__PERFETTO_UI_URL__ = ${JSON.stringify(this.uiTarget.url)};
+      window.__PERFETTO_UI_LABEL__ = ${JSON.stringify(this.uiTarget.label)};
+      window.__PERFETTO_UI_IS_BUNDLED__ = ${JSON.stringify(this.uiTarget.isBundled)};
     </script>
     <script nonce="${nonce}" src="${scriptUri}"></script>
   </body>
@@ -173,20 +184,6 @@ export class PerfettoPanel implements vscode.Disposable {
     if (typeof text === 'string' && text.length > 0) {
       this.log(`Webview: ${text}`);
     }
-  }
-
-  private resolveUiTarget(webview: vscode.Webview): { url: string; label: string } {
-    if (this.uiUrlOverride) {
-      return {
-        url: this.uiUrlOverride,
-        label: this.uiUrlOverride,
-      };
-    }
-
-    return {
-      url: webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'perfetto-ui', 'index.html')).toString(),
-      label: 'bundled Perfetto UI',
-    };
   }
 }
 

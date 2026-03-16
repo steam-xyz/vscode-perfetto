@@ -4,26 +4,44 @@ const status = document.getElementById('status');
 
 let uiUrl = window.__PERFETTO_UI_URL__ || 'https://ui.perfetto.dev';
 let uiLabel = window.__PERFETTO_UI_LABEL__ || 'Perfetto UI';
+let uiIsBundled = window.__PERFETTO_UI_IS_BUNDLED__ === true;
 let uiOrigin = getOrigin(uiUrl);
 let ready = false;
+let traceReceiverReady = false;
 let pingTimer = undefined;
 let transfer = undefined;
 let pendingTrace = undefined;
 let waitStartedAt = 0;
 let lastWaitLogAt = -1;
 
-setUiUrl(uiUrl, uiLabel);
-log(`Panel initialized. Target UI: ${uiLabel}`);
+setUiUrl(uiUrl, uiLabel, uiIsBundled);
+log(`Panel initialized. Target UI: ${uiLabel}. Bundled: ${uiIsBundled}.`);
 
 window.addEventListener('message', (event) => {
-  if (event.source === frame.contentWindow && event.origin === uiOrigin) {
-    if (event.data === 'PONG') {
-      ready = true;
-      stopPing();
-      const waitMs = waitStartedAt > 0 ? Date.now() - waitStartedAt : 0;
-      log(`Received PONG from Perfetto UI after ${waitMs} ms.`);
+  if (isPerfettoUiLogMessage(event.data) && isLikelyBundledFrameEvent(event)) {
+    log(`Perfetto UI ${event.data.__vscodePerfettoLog__.level}: ${event.data.__vscodePerfettoLog__.message}`);
+    return;
+  }
+
+  if (isPerfettoUiStateMessage(event.data) && isLikelyBundledFrameEvent(event)) {
+    if (event.data.__vscodePerfettoState__.code === 'trace_ready') {
+      traceReceiverReady = true;
       openPendingTrace();
     }
+    log(`Perfetto UI state: ${event.data.__vscodePerfettoState__.message}`);
+    return;
+  }
+
+  if (event.data === 'PONG' && event.source === frame.contentWindow && event.origin === uiOrigin) {
+    ready = true;
+    stopPing();
+    const waitMs = waitStartedAt > 0 ? Date.now() - waitStartedAt : 0;
+    log(`Received PONG from Perfetto UI after ${waitMs} ms.`);
+    openPendingTrace();
+    return;
+  }
+
+  if (event.source === frame.contentWindow) {
     return;
   }
 
@@ -33,12 +51,12 @@ window.addEventListener('message', (event) => {
   }
 
   if (message.type === 'setUiUrl') {
-    setUiUrl(message.uiUrl, message.uiLabel);
+    setUiUrl(message.uiUrl, message.uiLabel, message.uiIsBundled);
     return;
   }
 
   if (message.type === 'openTraceStart') {
-    setUiUrl(message.uiUrl, message.uiLabel);
+    setUiUrl(message.uiUrl, message.uiLabel, message.uiIsBundled);
     transfer = {
       transferId: message.transferId,
       fileName: message.fileName,
@@ -67,6 +85,14 @@ window.addEventListener('message', (event) => {
 });
 
 frame.addEventListener('load', () => {
+  if (uiIsBundled) {
+    ready = true;
+    setStatus(`Opened ${uiLabel}`);
+    log(`Iframe loaded for ${uiLabel}.`);
+    openPendingTrace();
+    return;
+  }
+
   ready = false;
   waitStartedAt = Date.now();
   lastWaitLogAt = -1;
@@ -74,7 +100,7 @@ frame.addEventListener('load', () => {
   startPing();
 });
 
-function setUiUrl(nextUiUrl, nextUiLabel) {
+function setUiUrl(nextUiUrl, nextUiLabel, nextUiIsBundled) {
   if (typeof nextUiUrl !== 'string' || nextUiUrl.length === 0) {
     return;
   }
@@ -83,16 +109,23 @@ function setUiUrl(nextUiUrl, nextUiLabel) {
   if (typeof nextUiLabel === 'string' && nextUiLabel.length > 0) {
     uiLabel = nextUiLabel;
   }
+  uiIsBundled = nextUiIsBundled === true;
   uiOrigin = getOrigin(uiUrl);
   ready = false;
+  traceReceiverReady = false;
   stopPing();
   setStatus(`Connecting to ${uiLabel}...`);
-  log(`Connecting iframe to ${uiLabel}`);
+  log(`Connecting iframe to ${uiLabel}. Bundled: ${uiIsBundled}.`);
 
-  if (frame.src !== uiUrl) {
+  if (!sameUrl(frame.src, uiUrl)) {
     frame.src = uiUrl;
   } else {
-    startPing();
+    if (uiIsBundled) {
+      ready = true;
+      setStatus(`Opened ${uiLabel}`);
+    } else {
+      startPing();
+    }
   }
 }
 
@@ -120,7 +153,8 @@ function ping() {
 
   try {
     frame.contentWindow.postMessage('PING', uiOrigin);
-  } catch {
+  } catch (error) {
+    log(`Failed to post PING to ${uiLabel}: ${toErrorMessage(error)}`);
     setStatus(`Connecting to ${uiLabel}...`);
   }
 }
@@ -133,13 +167,24 @@ function openPendingTrace() {
     return;
   }
 
+  if (uiIsBundled && !traceReceiverReady) {
+    updateWaitingStatus();
+    return;
+  }
+
   frame.contentWindow.postMessage(
-    {
-      perfetto: {
-        buffer: pendingTrace.buffer,
-        title: pendingTrace.fileName,
-      },
-    },
+    uiIsBundled
+      ? {
+          __vscodePerfettoOpenTrace__: true,
+          buffer: pendingTrace.buffer,
+          title: pendingTrace.fileName,
+        }
+      : {
+          perfetto: {
+            buffer: pendingTrace.buffer,
+            title: pendingTrace.fileName,
+          },
+        },
     uiOrigin,
     [pendingTrace.buffer],
   );
@@ -188,8 +233,59 @@ function getOrigin(value) {
   }
 }
 
+function isPerfettoUiLogMessage(value) {
+  return !!(
+    value &&
+    typeof value === 'object' &&
+    '__vscodePerfettoLog__' in value &&
+    value.__vscodePerfettoLog__ &&
+    typeof value.__vscodePerfettoLog__ === 'object' &&
+    typeof value.__vscodePerfettoLog__.level === 'string' &&
+    typeof value.__vscodePerfettoLog__.message === 'string'
+  );
+}
+
+function isPerfettoUiStateMessage(value) {
+  return !!(
+    value &&
+    typeof value === 'object' &&
+    '__vscodePerfettoState__' in value &&
+    value.__vscodePerfettoState__ &&
+    typeof value.__vscodePerfettoState__ === 'object' &&
+    typeof value.__vscodePerfettoState__.code === 'string' &&
+    typeof value.__vscodePerfettoState__.message === 'string'
+  );
+}
+
+function isLikelyBundledFrameEvent(event) {
+  return uiIsBundled && (event.source === frame.contentWindow || event.source === null || event.origin === uiOrigin);
+}
+
+function sameUrl(left, right) {
+  if (!left || !right) {
+    return left === right;
+  }
+
+  try {
+    return new URL(left, window.location.href).toString() === new URL(right, window.location.href).toString();
+  } catch {
+    return left === right;
+  }
+}
+
+function toErrorMessage(error) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  return String(error);
+}
+
 function updateWaitingStatus() {
   if (ready) {
+    if (pendingTrace && uiIsBundled && !traceReceiverReady) {
+      setStatus(`Waiting for ${uiLabel} to accept traces...`);
+    }
     return;
   }
 
