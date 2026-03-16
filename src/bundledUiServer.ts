@@ -1,6 +1,7 @@
 import * as fs from 'node:fs/promises';
 import * as http from 'node:http';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import * as vscode from 'vscode';
 
 const CONTENT_TYPES = new Map<string, string>([
@@ -16,9 +17,18 @@ const CONTENT_TYPES = new Map<string, string>([
   ['.woff2', 'font/woff2'],
 ]);
 
+const TRACE_SESSION_TTL_MS = 60 * 60 * 1000;
+
+type TraceSession = {
+  createdAt: number;
+  fileName: string;
+  traceUri: vscode.Uri;
+};
+
 export class BundledUiServer implements vscode.Disposable {
   private readonly rootPath: string;
   private readonly log: (message: string) => void;
+  private readonly traceSessions = new Map<string, TraceSession>();
   private server: http.Server | undefined;
   private externalBaseUrlPromise: Promise<string> | undefined;
 
@@ -28,15 +38,19 @@ export class BundledUiServer implements vscode.Disposable {
   }
 
   public async getUiUrl(): Promise<string> {
-    if (!this.externalBaseUrlPromise) {
-      this.externalBaseUrlPromise = this.start();
-    }
+    return `${await this.getBaseUrl()}/`;
+  }
 
-    return `${await this.externalBaseUrlPromise}/`;
+  public async createTraceUrl(traceUri: vscode.Uri): Promise<string> {
+    const baseUrl = await this.getBaseUrl();
+    const sessionId = this.createTraceSession(traceUri);
+    const fileName = path.posix.basename(traceUri.path) || traceUri.toString(true);
+    return `${baseUrl}/api/traces/${encodeURIComponent(sessionId)}/${toTracePathSegment(fileName)}`;
   }
 
   public dispose(): void {
     this.externalBaseUrlPromise = undefined;
+    this.traceSessions.clear();
 
     if (!this.server) {
       return;
@@ -45,6 +59,38 @@ export class BundledUiServer implements vscode.Disposable {
     this.server.close();
     this.server = undefined;
     this.log('Bundled Perfetto UI server stopped.');
+  }
+
+  private createTraceSession(traceUri: vscode.Uri): string {
+    this.cleanupTraceSessions();
+
+    const fileName = path.posix.basename(traceUri.path) || traceUri.toString(true);
+    const sessionId = randomUUID();
+    this.traceSessions.set(sessionId, {
+      createdAt: Date.now(),
+      fileName,
+      traceUri,
+    });
+    this.log(`Created trace session ${sessionId} for ${fileName}.`);
+    return sessionId;
+  }
+
+  private cleanupTraceSessions(): void {
+    const now = Date.now();
+
+    for (const [sessionId, session] of this.traceSessions) {
+      if (now - session.createdAt > TRACE_SESSION_TTL_MS) {
+        this.traceSessions.delete(sessionId);
+      }
+    }
+  }
+
+  private async getBaseUrl(): Promise<string> {
+    if (!this.externalBaseUrlPromise) {
+      this.externalBaseUrlPromise = this.start();
+    }
+
+    return this.externalBaseUrlPromise;
   }
 
   private async start(): Promise<string> {
@@ -80,13 +126,20 @@ export class BundledUiServer implements vscode.Disposable {
   private async handleRequest(request: http.IncomingMessage, response: http.ServerResponse): Promise<void> {
     try {
       const method = request.method ?? 'GET';
+      const url = new URL(request.url ?? '/', 'http://127.0.0.1');
+
+      if (url.pathname.startsWith('/api/traces/')) {
+        await this.handleTraceRequest(url.pathname.slice('/api/traces/'.length), method, response);
+        return;
+      }
+
       if (method !== 'GET' && method !== 'HEAD') {
         response.writeHead(405, { 'Content-Type': 'text/plain; charset=utf-8' });
         response.end('Method Not Allowed');
         return;
       }
 
-      const filePath = this.resolveFilePath(request.url ?? '/');
+      const filePath = this.resolveFilePath(url.pathname);
       if (!filePath) {
         response.writeHead(400, { 'Content-Type': 'text/plain; charset=utf-8' });
         response.end('Bad Request');
@@ -134,9 +187,54 @@ export class BundledUiServer implements vscode.Disposable {
       response.end(await fs.readFile(filePath));
     } catch (error) {
       const code = isNodeError(error) && error.code === 'ENOENT' ? 404 : 500;
-      response.writeHead(code, { 'Content-Type': 'text/plain; charset=utf-8' });
+      response.writeHead(code, {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'text/plain; charset=utf-8',
+      });
       response.end(code === 404 ? 'Not Found' : 'Internal Server Error');
     }
+  }
+
+  private async handleTraceRequest(
+    requestPath: string,
+    method: string,
+    response: http.ServerResponse,
+  ): Promise<void> {
+    if (method !== 'GET' && method !== 'HEAD') {
+      response.writeHead(405, {
+        'Access-Control-Allow-Origin': '*',
+        'Content-Type': 'text/plain; charset=utf-8',
+      });
+      response.end('Method Not Allowed');
+      return;
+    }
+
+    this.cleanupTraceSessions();
+
+    const [encodedSessionId] = requestPath.split('/', 1);
+    const sessionId = decodeURIComponent(encodedSessionId ?? '');
+    const session = this.traceSessions.get(sessionId);
+
+    if (!session) {
+      response.writeHead(404, {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+      });
+      response.end('Unknown trace session');
+      return;
+    }
+
+    const bytes = await vscode.workspace.fs.readFile(session.traceUri);
+    response.writeHead(200, {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Expose-Headers': 'Content-Disposition',
+      'Cache-Control': 'no-store',
+      'Content-Disposition': `inline; filename="${escapeHeaderValue(session.fileName)}"`,
+      'Content-Length': bytes.byteLength,
+      'Content-Type': 'application/octet-stream',
+    });
+    response.end(method === 'HEAD' ? undefined : Buffer.from(bytes));
   }
 
   private resolveFilePath(requestUrl: string): string | undefined {
@@ -289,6 +387,19 @@ function injectBridgeScript(html: string): string {
   return html.replace('</body>', `  ${bridgeScript}\n</body>`);
 }
 
+function escapeHeaderValue(value: string): string {
+  return value.replaceAll(/[\r\n"]/g, '_');
+}
+
 function isNodeError(value: unknown): value is NodeJS.ErrnoException {
   return !!value && typeof value === 'object' && 'code' in value;
+}
+
+function toTracePathSegment(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return 'trace.pftrace';
+  }
+
+  return trimmed.replaceAll(/[^A-Za-z0-9._-]+/g, '_');
 }

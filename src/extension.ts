@@ -6,6 +6,9 @@ import { PerfettoPanel, type PerfettoUiTarget } from './perfettoPanel';
 const COMMAND_OPEN_TRACE = 'vscode-perfetto.openTrace';
 const COMMAND_SHOW_OUTPUT = 'vscode-perfetto.showOutput';
 const OUTPUT_CHANNEL_NAME = 'Perfetto';
+
+type PerfettoOpenMode = 'webview' | 'browser';
+
 let bundledUiServer: BundledUiServer | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -53,13 +56,30 @@ async function openTrace(
 
   const fileName = getTraceFileName(traceUri);
   const source = traceUri.toString(true);
+  const openMode = getPerfettoOpenMode(log);
+
+  log(`Open requested: ${source}`);
+  log(`Open mode: ${openMode}`);
+
+  if (openMode === 'browser') {
+    try {
+      await openTraceInBrowser(traceUri, log);
+      log(`Trace queued for ${fileName}.`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`Open failed for ${fileName}: ${message}`);
+      outputError(log, fileName, message);
+      void vscode.window.showErrorMessage(`Failed to open ${fileName}: ${message}`);
+    }
+    return;
+  }
+
   const uiTarget = await resolvePerfettoUiTarget(log);
   const panel = PerfettoPanel.createOrShow(context.extensionUri, uiTarget, log, () => {
     disposeBundledUiServer();
   });
 
   try {
-    log(`Open requested: ${source}`);
     log(`Perfetto UI: ${uiTarget.label}`);
     const readStart = Date.now();
     const bytes = await vscode.workspace.fs.readFile(traceUri);
@@ -76,6 +96,20 @@ async function openTrace(
 
 function outputError(log: (message: string) => void, fileName: string, message: string): void {
   log(`Error: ${fileName}: ${message}`);
+}
+
+function getPerfettoOpenMode(log?: (message: string) => void): PerfettoOpenMode {
+  const configuredValue = vscode.workspace
+    .getConfiguration('perfetto')
+    .get<string>('openMode', 'browser')
+    .trim();
+
+  if (configuredValue === 'webview' || configuredValue === 'browser') {
+    return configuredValue;
+  }
+
+  log?.(`Ignoring invalid perfetto.openMode: ${configuredValue}`);
+  return 'browser';
 }
 
 function getPerfettoUiOverride(log?: (message: string) => void): string | undefined {
@@ -120,6 +154,52 @@ async function resolvePerfettoUiTarget(log: (message: string) => void): Promise<
     label: 'bundled Perfetto UI',
     isBundled: true,
   };
+}
+
+async function openTraceInBrowser(traceUri: vscode.Uri, log: (message: string) => void): Promise<void> {
+  if (!bundledUiServer) {
+    throw new Error('Bundled Perfetto UI server is not initialized.');
+  }
+
+  const uiTarget = await resolvePerfettoUiTarget(log);
+  const traceUrl = await bundledUiServer.createTraceUrl(traceUri);
+  const browserUrl = buildBrowserUrl(uiTarget.url, traceUrl);
+
+  log(`Perfetto UI: ${uiTarget.label}`);
+  log(`Trace URL: ${traceUrl}`);
+  log(`Resolved browser URL: ${browserUrl}`);
+
+  await openInBrowser(browserUrl, log);
+}
+
+function buildBrowserUrl(uiUrl: string, traceUrl: string): string {
+  const target = new URL(uiUrl);
+  const routeArgs = new URLSearchParams();
+  routeArgs.set('url', traceUrl);
+  target.hash = `!/?${routeArgs.toString()}`;
+  return target.toString();
+}
+
+async function openInBrowser(url: string, log: (message: string) => void): Promise<void> {
+  const commandList = await vscode.commands.getCommands(true);
+
+  if (commandList.includes('workbench.action.browser.open')) {
+    log('Opening Perfetto in the integrated browser.');
+    await vscode.commands.executeCommand('workbench.action.browser.open', url);
+    return;
+  }
+
+  if (commandList.includes('simpleBrowser.show')) {
+    log('Integrated browser is unavailable, falling back to Simple Browser.');
+    await vscode.commands.executeCommand('simpleBrowser.show', url);
+    return;
+  }
+
+  log('Opening Perfetto in the system browser.');
+  const opened = await vscode.env.openExternal(vscode.Uri.parse(url));
+  if (!opened) {
+    throw new Error('VS Code failed to open the browser URL.');
+  }
 }
 
 async function updateCurrentPanelTarget(log: (message: string) => void): Promise<void> {

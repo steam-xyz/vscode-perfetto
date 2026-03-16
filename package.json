@@ -61,6 +61,15 @@
     "configuration": {
       "title": "Perfetto",
       "properties": {
+        "perfetto.openMode": {
+          "type": "string",
+          "enum": [
+            "webview",
+            "browser"
+          ],
+          "default": "browser",
+          "description": "How to open Perfetto. Use webview to embed the UI inside VS Code, or browser to open the UI URL in a browser."
+        },
         "perfetto.uiUrl": {
           "type": "string",
           "default": "",
