@@ -10,7 +10,8 @@ Use `Perfetto: Show Output` to inspect extension logs.
 
 ```bash
 pnpm run perfetto:fetch
-pnpm run perfetto:build:source
+# TODO: needs more testing
+# pnpm run perfetto:build:source
 ```
 
 ## Development
