@@ -39,14 +39,14 @@
       "explorer/context": [
         {
           "command": "vscode-perfetto.openTrace",
-          "when": "explorerResourceIsFolder == false && (resourceExtname == .json || resourceExtname == .chrom_trace || resourceExtname == .chrome_trace)",
+          "when": "explorerResourceIsFolder == false && (resourceExtname == .json || resourceExtname == .chrome_trace || resourceFilename =~ /\\.json\\.gz$/i)",
           "group": "navigation@50"
         }
       ],
       "editor/context": [
         {
           "command": "vscode-perfetto.openTrace",
-          "when": "resourceExtname == .json || resourceExtname == .chrom_trace || resourceExtname == .chrome_trace",
+          "when": "resourceExtname == .json || resourceExtname == .chrome_trace || resourceFilename =~ /\\.json\\.gz$/i",
           "group": "navigation@50"
         }
       ]
