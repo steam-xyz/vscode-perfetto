@@ -2,7 +2,7 @@
   "name": "vscode-perfetto",
   "displayName": "vscode-perfetto",
   "description": "vscode perfetto ui",
-  "version": "0.0.6",
+  "version": "0.0.7",
   "publisher": "gglin001-vscode",
   "license": "MIT",
   "packageManager": "pnpm@10.30.0",

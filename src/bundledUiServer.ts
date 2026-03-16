@@ -1,7 +1,9 @@
-import * as fs from 'node:fs/promises';
+import * as fs from 'node:fs';
+import * as fsPromises from 'node:fs/promises';
 import * as http from 'node:http';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
+import { pipeline } from 'node:stream/promises';
 import * as vscode from 'vscode';
 
 const CONTENT_TYPES = new Map<string, string>([
@@ -146,7 +148,7 @@ export class BundledUiServer implements vscode.Disposable {
         return;
       }
 
-      const stat = await fs.stat(filePath);
+      const stat = await fsPromises.stat(filePath);
       if (!stat.isFile()) {
         response.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8' });
         response.end('Not Found');
@@ -154,7 +156,7 @@ export class BundledUiServer implements vscode.Disposable {
       }
 
       if (path.basename(filePath) === 'index.html') {
-        const indexHtml = await fs.readFile(filePath, 'utf8');
+        const indexHtml = await fsPromises.readFile(filePath, 'utf8');
         const responseBody = injectBridgeScript(indexHtml);
         response.writeHead(200, {
           'Access-Control-Allow-Origin': '*',
@@ -184,8 +186,13 @@ export class BundledUiServer implements vscode.Disposable {
         return;
       }
 
-      response.end(await fs.readFile(filePath));
+      response.end(await fsPromises.readFile(filePath));
     } catch (error) {
+      if (response.headersSent) {
+        response.destroy(error instanceof Error ? error : undefined);
+        return;
+      }
+
       const code = isNodeError(error) && error.code === 'ENOENT' ? 404 : 500;
       response.writeHead(code, {
         'Access-Control-Allow-Origin': '*',
@@ -225,16 +232,50 @@ export class BundledUiServer implements vscode.Disposable {
       return;
     }
 
+    if (session.traceUri.scheme === 'file') {
+      await this.handleLocalTraceRequest(session, method, response);
+      return;
+    }
+
     const bytes = await vscode.workspace.fs.readFile(session.traceUri);
+    this.writeTraceHeaders(response, bytes.byteLength, session.fileName);
+    response.end(method === 'HEAD' ? undefined : Buffer.from(bytes));
+  }
+
+  private async handleLocalTraceRequest(
+    session: TraceSession,
+    method: string,
+    response: http.ServerResponse,
+  ): Promise<void> {
+    const stat = await fsPromises.stat(session.traceUri.fsPath);
+    if (!stat.isFile()) {
+      response.writeHead(404, {
+        'Access-Control-Allow-Origin': '*',
+        'Cache-Control': 'no-store',
+        'Content-Type': 'text/plain; charset=utf-8',
+      });
+      response.end('Not Found');
+      return;
+    }
+
+    this.writeTraceHeaders(response, stat.size, session.fileName);
+    if (method === 'HEAD') {
+      response.end();
+      return;
+    }
+
+    await pipeline(fs.createReadStream(session.traceUri.fsPath), response);
+  }
+
+  private writeTraceHeaders(response: http.ServerResponse, contentLength: number, fileName: string): void {
     response.writeHead(200, {
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Expose-Headers': 'Content-Disposition',
       'Cache-Control': 'no-store',
-      'Content-Disposition': `inline; filename="${escapeHeaderValue(session.fileName)}"`,
-      'Content-Length': bytes.byteLength,
+      'Content-Disposition': `inline; filename="${escapeHeaderValue(fileName)}"`,
+      'Content-Length': contentLength,
       'Content-Type': 'application/octet-stream',
     });
-    response.end(method === 'HEAD' ? undefined : Buffer.from(bytes));
   }
 
   private resolveFilePath(requestUrl: string): string | undefined {

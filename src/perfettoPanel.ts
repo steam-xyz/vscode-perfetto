@@ -101,8 +101,8 @@ export class PerfettoPanel implements vscode.Disposable {
       await this.panel.webview.postMessage({
         type: 'openTraceChunk',
         transferId,
-        index,
-        data: Buffer.from(bytes.subarray(start, end)).toString('base64'),
+        start,
+        data: toChunkBuffer(bytes, start, end),
       });
     }
 
@@ -201,4 +201,15 @@ function escapeHtml(value: string): string {
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
     .replaceAll('>', '&gt;');
+}
+
+function toChunkBuffer(bytes: Uint8Array, start: number, end: number): ArrayBuffer {
+  const chunk = bytes.subarray(start, end);
+  if (chunk.byteOffset === 0 && chunk.byteLength === chunk.buffer.byteLength && chunk.buffer instanceof ArrayBuffer) {
+    return chunk.buffer;
+  }
+
+  const buffer = new Uint8Array(chunk.byteLength);
+  buffer.set(chunk);
+  return buffer.buffer;
 }

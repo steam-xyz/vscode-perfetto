@@ -61,7 +61,9 @@ window.addEventListener('message', (event) => {
       transferId: message.transferId,
       fileName: message.fileName,
       totalBytes: message.totalBytes,
-      chunks: new Array(message.totalChunks),
+      totalChunks: message.totalChunks,
+      receivedChunks: 0,
+      buffer: new Uint8Array(message.totalBytes),
     };
     log(`Receiving trace ${message.fileName}, ${message.totalBytes} bytes in ${message.totalChunks} chunk(s).`);
     setStatus(`Loading ${message.fileName}...`);
@@ -69,14 +71,32 @@ window.addEventListener('message', (event) => {
   }
 
   if (message.type === 'openTraceChunk' && transfer && message.transferId === transfer.transferId) {
-    transfer.chunks[message.index] = decodeBase64(message.data);
+    const chunk = toUint8Array(message.data);
+    if (!chunk || typeof message.start !== 'number') {
+      log(`Ignoring invalid chunk for ${transfer.fileName}.`);
+      return;
+    }
+
+    const start = message.start;
+    const end = start + chunk.byteLength;
+    if (start < 0 || end > transfer.buffer.byteLength) {
+      log(`Ignoring out-of-range chunk for ${transfer.fileName}.`);
+      return;
+    }
+
+    transfer.buffer.set(chunk, start);
+    transfer.receivedChunks += 1;
     return;
   }
 
   if (message.type === 'openTraceEnd' && transfer && message.transferId === transfer.transferId) {
+    if (transfer.receivedChunks !== transfer.totalChunks) {
+      log(`Trace ${transfer.fileName} ended with ${transfer.receivedChunks}/${transfer.totalChunks} chunk(s) received.`);
+    }
+
     pendingTrace = {
       fileName: transfer.fileName,
-      buffer: joinChunks(transfer.chunks, transfer.totalBytes),
+      buffer: transfer.buffer.buffer,
     };
     log(`Trace ${transfer.fileName} is buffered in the webview.`);
     transfer = undefined;
@@ -198,31 +218,20 @@ function setStatus(text) {
   status.textContent = text;
 }
 
-function decodeBase64(value) {
-  const binary = atob(value);
-  const bytes = new Uint8Array(binary.length);
-
-  for (let index = 0; index < binary.length; index += 1) {
-    bytes[index] = binary.charCodeAt(index);
+function toUint8Array(value) {
+  if (value instanceof Uint8Array) {
+    return value;
   }
 
-  return bytes;
-}
-
-function joinChunks(chunks, totalBytes) {
-  const buffer = new Uint8Array(totalBytes);
-  let offset = 0;
-
-  for (const chunk of chunks) {
-    if (!chunk) {
-      continue;
-    }
-
-    buffer.set(chunk, offset);
-    offset += chunk.byteLength;
+  if (value instanceof ArrayBuffer) {
+    return new Uint8Array(value);
   }
 
-  return buffer.buffer;
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+
+  return undefined;
 }
 
 function getOrigin(value) {
