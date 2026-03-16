@@ -1,4 +1,4 @@
 {
-  // "perfetto.openMode": "browser",
-  "perfetto.openMode": "webview",
+  "perfetto.openMode": "browser",
+  // "perfetto.openMode": "webview",
 }
