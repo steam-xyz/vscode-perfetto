@@ -20,7 +20,6 @@
   "main": "./dist/extension.js",
   "files": [
     "dist",
-    "media",
     "perfetto-ui",
     "README.md",
     "LICENSE"
@@ -57,20 +56,6 @@
           "group": "navigation@50"
         }
       ]
-    },
-    "configuration": {
-      "title": "Perfetto",
-      "properties": {
-        "perfetto.openMode": {
-          "type": "string",
-          "enum": [
-            "webview",
-            "browser"
-          ],
-          "default": "browser",
-          "description": "How to open the bundled Perfetto UI. Use webview to embed it inside VS Code, or browser to open it in a browser."
-        }
-      }
     }
   },
   "scripts": {

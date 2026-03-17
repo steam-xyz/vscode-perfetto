@@ -6,7 +6,7 @@ Right-click a `.json`, `.json.gz`, or `.chrome_trace` file and choose `Open in P
 
 Use `Perfetto: Show Output` to inspect extension logs.
 
-By default the extension opens the bundled Perfetto UI in browser mode. Set `perfetto.openMode` to `webview` if you want to embed the bundled UI inside a VS Code webview instead. In browser mode the extension exposes the selected trace through a temporary local endpoint and passes that URL to the bundled UI via `?url=...`.
+The extension opens the bundled Perfetto UI in VS Code's integrated browser. It exposes the selected trace through a temporary local endpoint and passes that URL to the bundled UI via `?url=...`.
 
 ## Update Bundled Perfetto UI
 

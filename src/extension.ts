@@ -1,14 +1,11 @@
 import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { BundledUiServer } from './bundledUiServer';
-import { PerfettoPanel, type PerfettoUiTarget } from './perfettoPanel';
 
 const COMMAND_OPEN_TRACE = 'vscode-perfetto.openTrace';
 const COMMAND_SHOW_OUTPUT = 'vscode-perfetto.showOutput';
 const OUTPUT_CHANNEL_NAME = 'Perfetto';
 const BUNDLED_UI_LABEL = 'bundled Perfetto UI';
-
-type PerfettoOpenMode = 'webview' | 'browser';
 
 let bundledUiServer: BundledUiServer | undefined;
 
@@ -26,7 +23,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     vscode.commands.registerCommand(COMMAND_OPEN_TRACE, async (resource?: vscode.Uri) => {
-      await openTrace(context, resource ?? vscode.window.activeTextEditor?.document.uri, log);
+      await openTrace(resource ?? vscode.window.activeTextEditor?.document.uri, log);
     }),
   );
 
@@ -38,7 +35,6 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 async function openTrace(
-  context: vscode.ExtensionContext,
   traceUri: vscode.Uri | undefined,
   log: (message: string) => void,
 ): Promise<void> {
@@ -49,35 +45,12 @@ async function openTrace(
 
   const fileName = getTraceFileName(traceUri);
   const source = traceUri.toString(true);
-  const openMode = getPerfettoOpenMode(log);
 
   log(`Open requested: ${source}`);
-  log(`Open mode: ${openMode}`);
-
-  if (openMode === 'browser') {
-    try {
-      await openTraceInBrowser(traceUri, log);
-      log(`Trace queued for ${fileName}.`);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      log(`Open failed for ${fileName}: ${message}`);
-      outputError(log, fileName, message);
-      void vscode.window.showErrorMessage(`Failed to open ${fileName}: ${message}`);
-    }
-    return;
-  }
-
-  const uiTarget = await resolvePerfettoUiTarget();
-  const panel = PerfettoPanel.createOrShow(context.extensionUri, uiTarget, log, () => {
-    disposeBundledUiServer();
-  });
+  log('Open mode: browser');
 
   try {
-    log(`Perfetto UI: ${uiTarget.label}`);
-    const readStart = Date.now();
-    const bytes = await vscode.workspace.fs.readFile(traceUri);
-    log(`Read ${bytes.byteLength} bytes in ${Date.now() - readStart} ms.`);
-    await panel.openTrace(traceUri, bytes);
+    await openTraceInBrowser(traceUri, log);
     log(`Trace queued for ${fileName}.`);
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -91,29 +64,12 @@ function outputError(log: (message: string) => void, fileName: string, message: 
   log(`Error: ${fileName}: ${message}`);
 }
 
-function getPerfettoOpenMode(log?: (message: string) => void): PerfettoOpenMode {
-  const configuredValue = vscode.workspace
-    .getConfiguration('perfetto')
-    .get<string>('openMode', 'browser')
-    .trim();
-
-  if (configuredValue === 'webview' || configuredValue === 'browser') {
-    return configuredValue;
-  }
-
-  log?.(`Ignoring invalid perfetto.openMode: ${configuredValue}`);
-  return 'browser';
-}
-
-async function resolvePerfettoUiTarget(): Promise<PerfettoUiTarget> {
+async function getBundledUiUrl(): Promise<string> {
   if (!bundledUiServer) {
     throw new Error('Bundled Perfetto UI server is not initialized.');
   }
 
-  return {
-    url: await bundledUiServer.getUiUrl(),
-    label: BUNDLED_UI_LABEL,
-  };
+  return bundledUiServer.getUiUrl();
 }
 
 async function openTraceInBrowser(traceUri: vscode.Uri, log: (message: string) => void): Promise<void> {
@@ -121,11 +77,11 @@ async function openTraceInBrowser(traceUri: vscode.Uri, log: (message: string) =
     throw new Error('Bundled Perfetto UI server is not initialized.');
   }
 
-  const uiTarget = await resolvePerfettoUiTarget();
+  const uiUrl = await getBundledUiUrl();
   const traceUrl = await bundledUiServer.createTraceUrl(traceUri);
-  const browserUrl = buildBrowserUrl(uiTarget.url, traceUrl);
+  const browserUrl = buildBrowserUrl(uiUrl, traceUrl);
 
-  log(`Perfetto UI: ${uiTarget.label}`);
+  log(`Perfetto UI: ${BUNDLED_UI_LABEL}`);
   log(`Trace URL: ${traceUrl}`);
   log(`Resolved browser URL: ${browserUrl}`);
 
@@ -144,29 +100,13 @@ function buildBrowserUrl(uiUrl: string, traceUrl: string): string {
 async function openInBrowser(url: string, log: (message: string) => void): Promise<void> {
   const commandList = await vscode.commands.getCommands(true);
 
-  if (commandList.includes('workbench.action.browser.open')) {
-    log('Opening Perfetto in the integrated browser.');
-    await vscode.commands.executeCommand('workbench.action.browser.open', url);
-    return;
+  if (!commandList.includes('workbench.action.browser.open')) {
+    throw new Error('VS Code integrated browser is unavailable.');
   }
 
-  if (commandList.includes('simpleBrowser.show')) {
-    log('Integrated browser is unavailable, falling back to Simple Browser.');
-    await vscode.commands.executeCommand('simpleBrowser.show', url);
-    return;
-  }
-
-  log('Opening Perfetto in the system browser.');
-  const opened = await vscode.env.openExternal(vscode.Uri.parse(url));
-  if (!opened) {
-    throw new Error('VS Code failed to open the browser URL.');
-  }
+  log('Opening Perfetto in the integrated browser.');
+  await vscode.commands.executeCommand('workbench.action.browser.open', url);
 }
-
-function disposeBundledUiServer(): void {
-  bundledUiServer?.dispose();
-}
-
 function getTraceFileName(resource: vscode.Uri): string {
   return path.posix.basename(resource.path) || resource.toString(true);
 }

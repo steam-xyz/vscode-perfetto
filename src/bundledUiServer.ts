@@ -421,7 +421,7 @@ function injectBridgeScript(html: string): string {
       window.addEventListener('load', maybeNotifyReady);
       readyTimerId = window.setInterval(maybeNotifyReady, 100);
       if (window[DISABLE_BACKGROUND_LOADS_KEY] === true) {
-        postLog('info', ['Disabled Perfetto background warmup tasks for integrated browser mode.']);
+        postLog('info', ['Disabled Perfetto background warmup tasks for browser mode.']);
       }
       postLog('debug', ['Perfetto UI bridge installed.']);
     })();
